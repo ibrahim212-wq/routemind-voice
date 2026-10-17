@@ -30,9 +30,13 @@ from tools.voice_audition import audition as A
 ISLAND_GAP_S = 0.30
 LONG_PAUSE_S = 0.60
 MAX_ISLANDS = 4
-SKIP_ISLAND = 0.8
+# Costs: leaving out an island the script does not have is CHEAP (the model ad-libs whole sentences between lines —
+# Despina's 17-line audition request: ~20 islands of her own), a line that is not there costs a whole line, and a
+# match worse than MATCH_MAX is never forced (it costs more than leaving the line out: the line is rendered again).
+SKIP_ISLAND = 0.2
 SKIP_LINE = 1.0
 MATCH_MAX = 0.45
+BAD_MATCH = SKIP_LINE + 0.1
 PAD_S = 0.08
 
 
@@ -106,7 +110,8 @@ def transcript_cut(wav_b, lines, lang="ar"):
         key = (i, j, n)
         if key not in cost:
             h = " ".join(t for t in heard[j:j + n] if t)
-            cost[key] = min(1.0, A.cer_ar(lines[i], h)) if h else 1.0
+            c = min(1.0, A.cer_ar(lines[i], h)) if h else 1.0
+            cost[key] = c if c <= MATCH_MAX else BAD_MATCH
         return cost[key]
 
     dp = [[INF] * (m + 1) for _ in range(k + 1)]
@@ -144,7 +149,8 @@ def transcript_cut(wav_b, lines, lang="ar"):
         else:
             _, li, j0, n = step
             c = match(li, j0, n)
-            rep["cer"][li] = round(c, 3)
+            h = " ".join(t for t in heard[j0:j0 + n] if t)
+            rep["cer"][li] = round(min(1.0, A.cer_ar(lines[li], h)) if h else 1.0, 3)
             rep["heard"][li] = " ".join(t for t in heard[j0:j0 + n] if t)
             if c <= MATCH_MAX:
                 a, b = mids[j0], mids[j0 + n]

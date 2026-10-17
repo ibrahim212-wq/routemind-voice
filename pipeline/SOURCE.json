@@ -22,7 +22,7 @@
   "tools/voice_audition/azure.py": "f3ae6581ded572e7be473532e89a49ead43eee4b9c5717351502b564936142d1",
   "tools/voice_audition/bank_plan.py": "a20873f71211d4342bbdf9b0b0683bdcecdcb8132a9a6e581e8caa66137eccd0",
   "tools/voice_bank/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "tools/voice_bank/align.py": "a195add51c028005ab80f01bdf21ba49691abbda41be9c5fc7558270c15d00c5",
+  "tools/voice_bank/align.py": "2f7866aa908e23209bebfbc22e7f0be0c5a4b390dd8ca24c5b7eb98bf33c7cee",
   "tools/voice_bank/banks.py": "61a4024cd26d4290ef7e0ae7767f8f08b84e9f2a449980c8c702cf085cfb7f34",
   "tools/voice_bank/build.py": "bbe78240eac5ea832c08d64d7f2c10f62bbed015a75470c6428d76c585eebf62",
   "tools/voice_bank/ci/requirements.txt": "b0580a99410e743b12e0d60b4ec71e7003e2508a522a8b76757ebc1baaa8694c",
