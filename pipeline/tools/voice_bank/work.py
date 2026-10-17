@@ -143,40 +143,80 @@ def remote_work_json():
         return json.load(io.open(p, encoding="utf-8"))
 
 
+PART_BYTES = 2_500_000   # an asset larger than this goes up in parts: the desk's uplink stalls on one 10 MB body
+                         # (HTTP 408 "upload body timed out due to inactivity", 2026-10-17); 1-3 MB go up in ~10 s
+
+
+def _sha(v):
+    return v.get("sha256") if isinstance(v, dict) else v
+
+
+def _stage_asset(stage, name, data):
+    """Write `name` (whole, or as name.partNNN when larger than PART_BYTES) → (listing entry, [paths])."""
+    sha = hashlib.sha256(data).hexdigest()
+    if len(data) <= PART_BYTES:
+        p = os.path.join(stage, name)
+        open(p, "wb").write(data)
+        return {"sha256": sha, "bytes": len(data)}, [p]
+    parts, paths = [], []
+    for i in range(0, len(data), PART_BYTES):
+        pn = "%s.part%03d" % (name, i // PART_BYTES)
+        p = os.path.join(stage, pn)
+        open(p, "wb").write(data[i:i + PART_BYTES])
+        parts.append(pn)
+        paths.append(p)
+    return {"sha256": sha, "bytes": len(data), "parts": parts}, paths
+
+
 def push(out, lead=None):
+    import datetime
     ensure_release()
     have = remote_work_json().get("assets", {})
     stage = tempfile.mkdtemp(prefix="vb-work-")
     try:
-        assets = {}
-        files = []
+        assets, files = {}, []
+        named = []
         for build in sorted(m["build"] for m in BK.BANKS.values()):
-            name = "clips-%s.tar" % build
-            p = os.path.join(stage, name)
-            assets[name] = write_tar(p, clip_members(out, build), gz=False)
-            if have.get(name) != assets[name]:
-                files.append(p)
+            tmp = os.path.join(stage, "_t")
+            write_tar(tmp, clip_members(out, build), gz=False)
+            named.append(("clips-%s.tar" % build, open(tmp, "rb").read(), False))
         if lead:
-            p = os.path.join(stage, "context_lead.mp3")
-            shutil.copyfile(lead, p)
-            assets["context_lead.mp3"] = hashlib.sha256(open(p, "rb").read()).hexdigest()
-            if have.get("context_lead.mp3") != assets["context_lead.mp3"]:
-                files.append(p)
-        elif "context_lead.mp3" in have:
+            named.append(("context_lead.mp3", open(lead, "rb").read(), False))
+        tmp = os.path.join(stage, "_t")
+        write_tar(tmp, state_members(out), gz=True)
+        named.append(("state.tar.gz", open(tmp, "rb").read(), True))   # the state goes every time (the run's record)
+        os.remove(tmp)
+        for name, data, always in named:
+            entry, paths = _stage_asset(stage, name, data)
+            assets[name] = entry
+            if always or _sha(have.get(name)) != entry["sha256"]:
+                files += paths
+            elif isinstance(have.get(name), dict):
+                assets[name] = have[name]                   # unchanged: keep the uploaded listing (its part names)
+        if not lead and "context_lead.mp3" in have:
             assets["context_lead.mp3"] = have["context_lead.mp3"]
-        p = os.path.join(stage, "state.tar.gz")
-        assets["state.tar.gz"] = write_tar(p, state_members(out), gz=True)
-        files.append(p)                                    # the state goes every time (it carries the run's record)
         wj = os.path.join(stage, "work.json")
-        import datetime
         io.open(wj, "w", encoding="utf-8").write(json.dumps({
             "updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "assets": assets}, indent=1))
         # clips + lead first, then the state, then work.json LAST (a pull that finds a work.json finds its files)
         for f in files + [wj]:
-            gh("release", "upload", TAG, f, "--clobber", "-R", REPO)
+            for attempt in range(3):
+                r = gh("release", "upload", TAG, f, "--clobber", "-R", REPO, check=attempt == 2)
+                if r.returncode == 0:
+                    break
+                log("upload of %s failed (%s) — again" % (os.path.basename(f), (r.stderr or "").strip()[-120:]))
             log("uploaded %s (%.1f KB)" % (os.path.basename(f), os.path.getsize(f) / 1024.0))
-        log("work state pushed: %s" % ", ".join("%s %s" % (k, v[:10]) for k, v in sorted(assets.items())))
+        # assets no listing names any more (old parts, a test file) go
+        keep = {"work.json"} | {n for n, e in assets.items() if not isinstance(e, dict) or not e.get("parts")}
+        keep |= {pn for e in assets.values() if isinstance(e, dict) for pn in (e.get("parts") or [])}
+        r = gh("release", "view", TAG, "-R", REPO, "--json", "assets", check=False)
+        if r.returncode == 0:
+            for a_ in json.loads(r.stdout).get("assets", []):
+                if a_["name"] not in keep:
+                    gh("release", "delete-asset", TAG, a_["name"], "-R", REPO, "-y", check=False)
+                    log("removed the stale asset %s" % a_["name"])
+        log("work state pushed: %s" % ", ".join("%s %s" % (k, _sha(v)[:10]) for k, v in sorted(assets.items())))
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -189,11 +229,17 @@ def pull(out, lead_dst=None):
                          "python -m tools.voice_bank.work seed" % REPO)
     with tempfile.TemporaryDirectory() as d:
         gh("release", "download", TAG, "-R", REPO, "-D", d, "--clobber")
+        wj = os.path.join(d, "work.json")
+        listing = json.load(io.open(wj, encoding="utf-8")).get("assets", {}) if os.path.exists(wj) else {}
         aud = aud_dir(out)
-        for f in sorted(os.listdir(d)):
-            p = os.path.join(d, f)
-            if f.endswith((".tar", ".tar.gz")):
-                with tarfile.open(p, "r:*") as t:
+        for name, entry in sorted(listing.items()):
+            parts = entry.get("parts") if isinstance(entry, dict) else None
+            data = (b"".join(open(os.path.join(d, pn), "rb").read() for pn in parts) if parts
+                    else open(os.path.join(d, name), "rb").read())
+            if hashlib.sha256(data).hexdigest() != _sha(entry):
+                raise SystemExit("[work] %s does not match work.json (a push was interrupted?)" % name)
+            if name.endswith((".tar", ".tar.gz")):
+                with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as t:
                     for ti in t.getmembers():
                         if not ti.isfile() or ti.name.startswith(("/", "..")) or "/../" in ti.name:
                             continue
@@ -203,10 +249,10 @@ def pull(out, lead_dst=None):
                         os.makedirs(os.path.dirname(dst), exist_ok=True)
                         with open(dst, "wb") as fh:
                             fh.write(t.extractfile(ti).read())
-                log("unpacked %s" % f)
-            elif f == "context_lead.mp3" and lead_dst:
+                log("unpacked %s (%.1f KB)" % (name, len(data) / 1024.0))
+            elif name == "context_lead.mp3" and lead_dst:
                 os.makedirs(os.path.dirname(lead_dst), exist_ok=True)
-                shutil.copyfile(p, lead_dst)
+                open(lead_dst, "wb").write(data)
                 log("lead clip → %s" % lead_dst)
 
 

@@ -2047,9 +2047,24 @@ def sekka_summary(R):
             per = (sum(tin) / len(tin)) * SK_GEMINI_IN + (sum(aud) / len(aud)) * SK_GEMINI_TPS * SK_GEMINI_OUT
             gcost = {"usd_per_conversation": round(SK_TURNS * per, 5), "prompt_tokens_per_reply": round(sum(tin) / len(tin)),
                      "audio_s_per_reply": round(sum(aud) / len(aud), 2)}
-    ar.append(ar_row("(b) Gemini %s · %s" % (SEKKA_GEMINI_VOICE, MAIN_MODEL), gb or gs,
-                     "the audition's Despina settings: prompt_ar_batch (6 replies, one request) / prompt_ar (alone), "
-                     "pronounce.py SAY", {"gemini_p50_s": lat(gs), "n": len(gs)}, gcost or {},
+    ttfa_b = {"gemini_p50_s": lat(gs), "n": len(gs)}
+    how_b = ("the audition's Despina settings: prompt_ar_batch (6 replies, one request) / prompt_ar (alone), "
+             "pronounce.py SAY")
+    live = [r for r in gb if (r.get("meta") or {}).get("bank_request")]
+    if live and not gs:
+        # 2026-10-17: measured at ZERO extra requests — the six replies rode at the end of a navigation-bank request
+        # (tools/voice_bank/sekka_live.py), STREAMED: the time to first audio is that request's first audio chunk
+        m0 = live[0]["meta"]
+        ttfa_b = {"gemini_p50_s": m0.get("first_audio_s"), "n": "1, streamed — the bank request's first audio chunk"}
+        how_b = ("the audition's Despina text (pronounce.py SAY) at the end of one navigation-bank request of %s "
+                 "lines (prompt_ar_batch), judged by the bank's quota-free judges: Azure STT read-back + the blind "
+                 "phone listener (no accent / case-ending scores)" % m0.get("batched"))
+        aud = [(r.get("meta") or {}).get("audio_s") for r in live if (r.get("meta") or {}).get("audio_s")]
+        if aud:      # one live reply = one request: the director's notes (≈ 330 tokens, measured) + its audio
+            per = 330 * SK_GEMINI_IN + (sum(aud) / len(aud)) * SK_GEMINI_TPS * SK_GEMINI_OUT
+            gcost = {"usd_per_conversation": round(SK_TURNS * per, 5), "prompt_tokens_per_reply": 330,
+                     "audio_s_per_reply": round(sum(aud) / len(aud), 2)}
+    ar.append(ar_row("(b) Gemini %s · %s" % (SEKKA_GEMINI_VOICE, MAIN_MODEL), gb or gs, how_b, ttfa_b, gcost or {},
                      note=R.state.get("sekka_gemini_error") or ""))
     # the comparative rankings: Borda points over the finalists in every ranking (both clip orders)
     names = {"%s|%s" % (v, az_model(c)): (v, c) for v, c in SEKKA_EN_FINAL}

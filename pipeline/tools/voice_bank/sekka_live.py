@@ -141,6 +141,7 @@ def import_to_audition():
     if not st.get("pieces"):
         raise SystemExit("no Sekka measurement yet")
     A.LIM = A.Limits()
+    os.makedirs(A.CACHE, exist_ok=True)
     R = A.Run()
     byid = {ln["id"]: ln for ln in lines()}
     key = (st.get("meta") or {}).get("key") or "bank"

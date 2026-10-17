@@ -109,11 +109,14 @@ AZ_BANK_BATCH = 25
 AZ_BANK_SEP = "nl"
 GEMINI_BATCH = 25                 # the plan's lower bound (§d: 25-40 segments a request) — the measured base
 # The first Gemini day MEASURES larger requests before one is adopted (Build.calibrate): the same CAL_SHARED segments
-# alone and spread through a request of each size; the largest size within CAL_TOL of the base wins. 100 segments ≈
-# 257 s of speech ≈ 6,400 output tokens (the model's limit: 16,384 ≈ 650 s).
-CAL_SIZES = [25, 50, 100]
+# alone and spread through a request of each size; the largest size within CAL_TOL of the base wins. 150 segments ≈
+# 385 s of speech ≈ 9,600 output tokens (the model's limit: 16,384 ≈ 650 s). The proxy on gemini-3.8-flash-lite-tts
+# (Despina, 2026-10-17, the STT judge): shared segments 25 → 0.84, 50 → 0.96, 100 → 0.88 (all 100: 0.93) — the
+# 100-segment take slipped by a line in one stretch and was re-cut by its transcript (realign).
+CAL_SIZES = [25, 50, 100, 150]
 CAL_SHARED = 25
 CAL_TOL = 0.08                    # 2 of 25
+REALIGN_MIN = 2                   # pieces reading as a neighbour's line before a request is cut again by transcript
 MAX_TAKES = 3
 MAX_ERRORS = 3                    # requests that gave no audio for a segment before it waits for a human
 PACE_MIN, PACE_MAX = 0.035, 0.20  # seconds per spoken letter
@@ -342,7 +345,8 @@ class Build:
                "first_audio_s": meta.get("first_audio_s"), "audio_s": round(audio_s, 1),
                "tokens_out": ((meta.get("usage") or {}).get("candidatesTokenCount")), "cut_ok": pieces is not None,
                "take": max(takes), "gate": gate, "recovered": recovered, "run": self.s.get("run"),
-               "key": (meta.get("key") or "")[:16] or None}
+               "key": meta.get("key") or None, "lang": lang,
+               "segs": plain if (gem and k > 2) else None}
         self.s["requests"].append(req)
         res = {"req": req, "extra_pieces": [], "meta": {k: meta.get(k) for k in ("first_audio_s", "latency_s",
                                                                                    "audio_s", "usage", "key")}}
@@ -376,7 +380,8 @@ class Build:
                    "pace_ok": PACE_MIN <= spl <= PACE_MAX, "batched": k, "pos": i,
                    "audio_s": round(len(acoustics.pcm(pc)[0]) / float(rate), 2), "f0": st["f0_med"],
                    "gate": gate, "listens": [], "verdict": None, "phones": None, "pass": None,
-                   "first_audio_s": meta.get("first_audio_s"), "recovered": bool(recovered)}
+                   "first_audio_s": meta.get("first_audio_s"), "recovered": bool(recovered),
+                   "req": meta.get("key") if (gem and k > 2) else None}
             if is_cal:
                 cal.setdefault(x["seg"], {})[str(k)] = rec
                 continue
@@ -491,12 +496,15 @@ class Build:
             p["made"] = True
             p["request"] = res["req"]
             self.save()
-        jr = self.judge(order=order, langs=("ar",))
-        if jr != "done":
-            return "waiting for verdicts (%s)" % jr
-        left = self.judge_calibration()
-        if left:
-            return "waiting for %d calibration verdicts" % left
+        for _ in range(3):
+            jr = self.judge(order=order, langs=("ar",))
+            if jr != "done":
+                return "waiting for verdicts (%s)" % jr
+            left = self.judge_calibration()
+            if left:
+                return "waiting for %d calibration verdicts" % left
+            if not self.realign():               # a request cut wrong is cut again and heard again first
+                break
         return self.decide(sizes)
 
     def judge_calibration(self):
@@ -579,9 +587,98 @@ class Build:
         res = "done"
         for _ in range(2 + max(RELISTENS.values()) + MAX_DISCARDS):
             res, applied = self._judge_pass(rank, langs)
-            if res != "done" or not applied:
+            if res != "done":
+                break
+            if self.judge_mode == "stt" and "ar" in langs and self.realign():
+                continue                           # a re-cut request's pieces are heard again
+            if not applied:
                 break
         return res
+
+    # ── a batched take whose pieces read as their NEIGHBOURS' lines: cut it again by what was said ────────────
+    def _slots(self, key):
+        """[(pos, segment record or None, the piece dict)] of every take / calibration piece cut from request `key`."""
+        out = []
+        for r in self.s["segs"].values():
+            for t in r["takes"]:
+                if t.get("req") == key:
+                    out.append((t["pos"], r, t))
+        for seg, by in (self.s.get("calibration") or {}).get("pieces", {}).items():
+            for t in by.values():
+                if t.get("req") == key:
+                    out.append((t["pos"], {"seg": seg, "lang": "ar", "cat": "calibration"}, t))
+        return sorted(out, key=lambda x: x[0])
+
+    def realign(self):
+        """Every judged Arabic batch request with >= REALIGN_MIN shifted pieces (a piece that does not read as its own
+        line but reads as the line before or after it — the aligned cut slipped by a line) is cut again by the
+        transcript (align.transcript_cut, on the request's own cached audio); its pieces are replaced and heard again.
+        Once per request. → how many requests were re-cut."""
+        from tools.voice_bank import stt as STT
+        n = 0
+        for req in self.s["requests"]:
+            if req.get("lang") != "ar" or not req.get("segs") or req.get("realigned") or not req.get("key"):
+                continue
+            slots = self._slots(req["key"])
+            if not slots or any(t.get("verdict") is None for _, _, t in slots):
+                continue
+            segs = req["segs"]
+
+            def heard(t):
+                ls = t.get("listens") or []
+                return ls[-1]["transcript"] if ls else None
+            shifted = 0
+            for pos, r, t in slots:
+                h = heard(t)
+                if not h or t.get("pass"):
+                    continue
+                own = read_back_stt(r, h)["text_ok"]
+                if own:
+                    continue
+                for j in (pos - 1, pos + 1):
+                    if 0 <= j < len(segs) and _bare(segs[j]) != _bare(r["seg"]) and read_back_stt(
+                            {"lang": "ar", "seg": segs[j], "cat": "?"}, h)["text_ok"]:
+                        shifted += 1
+                        break
+            if shifted < REALIGN_MIN:
+                continue
+            wav_p = os.path.join(A.CACHE, req["key"] + ".wav")
+            if not os.path.exists(wav_p):
+                req["realigned"] = {"skipped": "the request's audio is not in the cache"}
+                continue
+            try:
+                pieces, rep = AL.transcript_cut(open(wav_p, "rb").read(), segs, "ar")
+            except (STT.Exhausted, STT.SttError) as e:
+                A.log("  realign: %s" % A.scrub(e)[:160])
+                return n
+            A.log("  realign %s: %d pieces read as a neighbour's line — transcript cut matched %d of %d" % (
+                req["key"][:12], shifted, rep["matched"], len(segs)))
+            req["realigned"] = {"shifted": shifted, "matched": rep["matched"], "islands": rep["islands"],
+                                "added_islands": rep["added_islands"], "missing": rep["missing"]}
+            for pos, r, t in slots:
+                pc = pieces[pos] if pos < len(pieces) else None
+                old = os.path.join(self.dir, t["clip"])
+                for f in (old, old + ".heard.mp3"):
+                    if os.path.exists(f):
+                        os.remove(f)
+                if pc is None:
+                    t.update(verdict={"skipped": "not found in the take by the transcript cut"}, listens=[],
+                             phones=None, **{"pass": False})
+                    if r.get("takes") and r["takes"] and r["takes"][-1] is t:
+                        r["status"] = "fail"
+                    continue
+                st = acoustics.clip_stats(pc, r["seg"])
+                spl = st["speech_s"] / spoken_letters(r["seg"], "ar")
+                A.encode_mp3(A.processed(pc), old)
+                x, rate = acoustics.pcm(pc)
+                t.update(s_per_letter=round(spl, 4), pace_ok=PACE_MIN <= spl <= PACE_MAX, f0=st["f0_med"],
+                         audio_s=round(len(x) / float(rate), 2), recovered=True, verdict=None, listens=[],
+                         phones=None, gate=None, **{"pass": None})
+                if r.get("takes") and r["takes"][-1] is t:
+                    r["status"] = "made"
+            n += 1
+            self.save()
+        return n
 
     def _judge_pass(self, rank, langs):
         applied = 0
@@ -669,10 +766,16 @@ class Build:
                 continue
             try:
                 clip = os.path.join(self.dir, r["takes"][-1]["clip"])
-                # English: the clip itself; Arabic: inside the line (the lead clip + VoiceBank's pause), as WAV —
-                # no second MP3 generation for a recogniser
-                audio = open(clip, "rb").read() if r["lang"] == "en" else A.in_context(A.mp3_to_wav(clip))
-                v = STT.verdict(audio, r["lang"])
+                # English: the clip itself — and, for a clip the recogniser could not read alone, a second listen
+                # INSIDE a line (behind the bank's own "In 300 meters," clip: a one-word clip alone is often heard
+                # as nothing or as a homophone). Arabic: always inside the line (the lead clip + VoiceBank's pause).
+                # WAV, no second MP3 generation for a recogniser.
+                ctx = r["lang"] == "ar" or bool(r["takes"][-1].get("listens"))
+                if r["lang"] == "en":
+                    audio = self.en_in_context(clip) if ctx else open(clip, "rb").read()
+                else:
+                    audio = A.in_context(A.mp3_to_wav(clip))
+                v = dict(STT.verdict(audio, r["lang"]), context=ctx)
             except STT.Exhausted as e:
                 self.save()
                 return "quota: %s" % A.scrub(e)[:160], applied
@@ -687,6 +790,20 @@ class Build:
                 A.log("  %d / %d heard" % (k + 1, len(heard)))
         self.save()
         return "done", applied
+
+    def en_in_context(self, clip):
+        """An English clip behind this bank's own lead clip EN_LEAD, with VoiceBank's comma pause (as a line)."""
+        import numpy as np
+        if "_en_lead" not in self.__dict__:
+            lr = self.s["segs"].get("en|" + EN_LEAD)
+            t = (self.published_take(lr) or lr["takes"][-1]) if lr and lr["takes"] else None
+            self._en_lead = acoustics.pcm(A.mp3_to_wav(os.path.join(self.dir, t["clip"]))) if t else None
+        x, rate = acoustics.pcm(A.mp3_to_wav(clip))
+        if not self._en_lead:
+            return build_bank_wav(x, rate)
+        gap = np.zeros(int(rate * mv.pause_after(EN_LEAD) / 1000.0), dtype=np.float32)
+        return build_bank_wav(np.concatenate([np.asarray(self._en_lead[0], dtype=np.float32), gap,
+                                              np.asarray(x, dtype=np.float32)]), rate)
 
     def heard_mp3s(self, lang, chunk):
         out = []
@@ -742,7 +859,8 @@ class Build:
                 return                             # this clip is heard again by the next run
             t["phones"] = ph
         stt = str(v.get("_judge_model") or "").startswith("azure-stt")
-        chk = read_back_stt(r, v.get("transcript", ""), v.get("itn", "")) if stt else read_back(r, v.get("transcript", ""))
+        chk = (read_back_stt(r, v.get("transcript", ""), v.get("itn", ""), lead=EN_LEAD if v.get("context") else None)
+               if stt else read_back(r, v.get("transcript", "")))
         # the STT read-back hears words, not the accent: for Arabic the dialect is the phone listener's (no hard flag)
         dialect = (None if stt else A.dialect_ok(v)) if r["lang"] == "ar" else None
         t.setdefault("listens", []).append({"model": v.get("_judge_model"), "transcript": v.get("transcript", ""),
@@ -754,7 +872,8 @@ class Build:
                         and (r["lang"] != "ar" or best["dialect_ok"] is not None or
                              str(best.get("model") or "").startswith("azure-stt")))
         local_ok = bool(t["pace_ok"] and not (ph or {}).get("hard") and self.f0_ok(r, t))
-        relistens = 0 if stt else RELISTENS.get(self.cfg["provider"], 0)
+        # the STT read-back is deterministic: English gets ONE second listen, inside a line (en_in_context)
+        relistens = (1 if r["lang"] == "en" else 0) if stt else RELISTENS.get(self.cfg["provider"], 0)
         if local_ok and not judge_ok and len(t["listens"]) <= relistens:
             r["status"] = "made"                   # heard once more, by another judge, before it stands
             return
@@ -839,7 +958,7 @@ def read_back(r, heard):
     return chk
 
 
-_EN_FOLD = [("on to", "onto"), ("st", "street"), ("rd", "road"), ("you turn", "u turn"), ("u-turn", "u turn"), ("okay", "ok"), ("o k", "ok"), ("km", "kilometers"),
+_EN_FOLD = [("wanna", "want to"), ("gonna", "going to"), ("on to", "onto"), ("st", "street"), ("rd", "road"), ("you turn", "u turn"), ("u-turn", "u turn"), ("okay", "ok"), ("o k", "ok"), ("km", "kilometers"),
             ("kilometre", "kilometer"), ("i will", "i'll"), ("you have", "you've"), ("do not", "don't")]
 
 
@@ -872,10 +991,19 @@ def _lev(a, b):
     return prev[-1]
 
 
+# words that SOUND the same — a recogniser cannot tell them apart, so neither can the gate ("continue write")
+EN_HOMOPHONES = [{"right", "write", "rite", "wright"}, {"four", "for", "fore"}, {"two", "to", "too"},
+                 {"bear", "bare"}, {"one", "won"}, {"eight", "ate"}, {"meters", "meter's"}, {"route", "root"},
+                 {"you're", "your"}, {"there", "their"}, {"weigh", "way"}]
+_HOMO = {w: frozenset(g) for g in EN_HOMOPHONES for w in g}
+EN_TAIL_FUNCTION = {"in", "about", "at", "to", "on", "the", "a", "of", "for", "by"}
+
+
 def _tok_eq(a, b):
-    """Two words a recogniser may write for the same spoken word: equal, a plural -s ("limit" / "limits"), or one
-    edit apart on a word of ≥ 4 letters ("ahead" / "head"). Critical words (en_critical) are matched exactly."""
-    if a == b:
+    """Two words a recogniser may write for the same spoken word: equal, homophones (EN_HOMOPHONES), a plural -s
+    ("limit" / "limits"), or one edit apart on a word of ≥ 4 letters ("ahead" / "head"). Other than homophones, the
+    critical words (en_critical) are matched exactly."""
+    if a == b or (a in _HOMO and b in _HOMO[a]):
         return True
     if a in EN_CRITICAL_WORDS or b in EN_CRITICAL_WORDS:
         return False
@@ -899,12 +1027,18 @@ def fuzzy_wer(a, b):
 def en_critical(src, heard):
     """English direction words / ordinals / U-turn / exit: each the segment says must be heard; right ⇄ left never
     swapped."""
+    heard = [next((w for w in _HOMO.get(x, ()) if w in EN_CRITICAL_WORDS), x) for x in heard]
     t, h = " " + " ".join(src) + " ", " " + " ".join(heard) + " "
     probs = ["lost " + w for w in EN_CRITICAL if (" %s " % w) in t and (" %s " % w) not in h]
     for a, b in (("right", "left"), ("left", "right")):
         if " %s " % a in t and " %s " % b not in t and " %s " % b in h:
             probs.append("swapped %s→%s" % (a, b))
     return probs
+
+
+def build_bank_wav(x, rate):
+    from tools.masri_voice import build_bank
+    return build_bank.wav_bytes(x, rate)
 
 
 def _read_back_en(r, heard):
@@ -916,7 +1050,16 @@ def _read_back_en(r, heard):
         typ = src[-1] if src and src[-1] in EN_ROAD_TYPES else None
         rest_s = src[:-1] if typ else src
         rest_h = list(got)
+        if typ and typ not in rest_h:
+            # a recogniser glues the type word to the name ("talat harbaxis", "al ganzoriakis"): split it off
+            for i in range(len(rest_h) - 1, -1, -1):
+                w = rest_h[i]
+                if len(w) > len(typ) + 1 and _lev(w[-len(typ):], typ) <= (0 if len(typ) <= 4 else 1):
+                    rest_h[i:i + 1] = [w[:-len(typ)], typ]
+                    break
+            got = rest_h
         if typ and typ in rest_h:
+            rest_h = list(rest_h)
             del rest_h[len(rest_h) - 1 - rest_h[::-1].index(typ)]
         ks, kh = _skeleton(rest_s), _skeleton(rest_h)
         ncer = _lev(ks, kh) / float(max(1, len(ks)))
@@ -926,6 +1069,8 @@ def _read_back_en(r, heard):
                 "skeleton": [ks, kh], "critical": crit, "text_ok": ok,
                 "problems": crit + ([] if typ_ok else ["lost %s" % typ])
                 + ([] if ncer <= EN_NAME_SKELETON_CER else ["name skeleton %s != %s (%.2f)" % (ks, kh, ncer)])}
+    if len(src) > 1 and src[-1] in EN_TAIL_FUNCTION and (not got or not _tok_eq(got[-1], src[-1])):
+        src = src[:-1]          # a fragment's last function word ("Road incident in") is swallowed by a recogniser
     w = fuzzy_wer(src, got)
     errors = round(w * len(src))
     # one ordinary word a recogniser got wrong is allowed in a segment of 4 words or more (the critical words never)
@@ -934,7 +1079,21 @@ def _read_back_en(r, heard):
             "problems": crit + ([] if ok or crit else ["WER %.2f" % w])}
 
 
-def read_back_stt(r, heard, itn=""):
+def _ar_resplit(heard, seg):
+    """A recogniser's word boundary is not the voice's: «خليك يمين» (khallīk yamīn) is the same sound as «خليكي مين»
+    — which would read as the FEMININE «خليكي». When a heard word ending in ي and the next word are both the
+    segment's words once the ي moves across the space, it moves."""
+    exp = set(A.ar_words(seg))
+    ws = (heard or "").split()
+    for i in range(len(ws) - 1):
+        a, b = ws[i], ws[i + 1]
+        if a.endswith("ي") and len(a) > 2 and A.ar_words(a[:-1]) and A.ar_words(a[:-1])[0] in exp and A.ar_words(
+                "ي" + b) and A.ar_words("ي" + b)[0] in exp and A.ar_words(a)[0] not in exp:
+            ws[i], ws[i + 1] = a[:-1], "ي" + b
+    return " ".join(ws)
+
+
+def read_back_stt(r, heard, itn="", lead=None):
     """The Azure STT read-back against the segment. English: the lexical words AND the recogniser's ITN form (digits),
     both through the bank's number-as-words fold, the better of the two — "200" = "two hundred", "1100" = "eleven
     hundred" = "one thousand one hundred"; case and punctuation never count; a recogniser's near-miss on an ordinary
@@ -945,8 +1104,17 @@ def read_back_stt(r, heard, itn=""):
     four words), whichever reads best."""
     heard = heard or ""
     if r["lang"] == "en":
-        return min((_read_back_en(r, h) for h in sorted({heard, itn or heard})),
-                   key=lambda c: (not c["text_ok"], c.get("frame_wer", 0.0) + c.get("name_cer", 0.0), c["wer"]))
+        cands = []
+        for h in sorted({heard, itn or heard}):
+            ws = h.split()
+            # heard inside a line: the lead's words come first (a recogniser writes "In 300 meters," as 3-5 words)
+            for k in (range(0, min(6, len(ws) + 1)) if lead else (0,)):
+                c = _read_back_en(r, " ".join(ws[k:]))
+                c["read"] = "segment after %d heard words" % k if lead else "alone"
+                cands.append(c)
+        return min(cands, key=lambda c: (not c["text_ok"], c.get("frame_wer", 0.0) + c.get("name_cer", 0.0),
+                                         c["wer"]))
+    heard = _ar_resplit(heard, r["seg"])
     best = A.text_check(read_line(r), heard)
     best["read"] = "line"
     words = heard.split()

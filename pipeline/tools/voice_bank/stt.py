@@ -65,12 +65,58 @@ def _seconds(wav):
 
 
 class Ledger:
+    """The month's billed seconds. Several processes may read back at once (the daily run, a desk check): every
+    write re-reads the file under an OS lock and adds to it, so no count is lost; `reconcile` rebuilds the counts from
+    the cache (one cache entry = one billed request) when in doubt."""
+
     def __init__(self):
         os.makedirs(OUT, exist_ok=True)
-        self.d = json.load(io.open(LEDGER, encoding="utf-8")) if os.path.exists(LEDGER) else {
-            "seconds": 0, "requests": 0, "failed": 0, "by_month": {}, "by_day": {}, "errors": []}
+        self.d = self._read()
+
+    @staticmethod
+    def _read():
+        try:
+            return json.load(io.open(LEDGER, encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"seconds": 0, "requests": 0, "failed": 0, "by_month": {}, "by_day": {}, "errors": []}
+
+    def _update(self, fn):
+        lock = open(LEDGER + ".lock", "a+")
+        try:
+            for _ in range(200):
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        lock.seek(0)
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            self.d = self._read()
+            fn(self.d)
+            tmp = "%s.%d.tmp" % (LEDGER, os.getpid())
+            io.open(tmp, "w", encoding="utf-8").write(json.dumps(self.d, indent=1))
+            for i in range(40):
+                try:
+                    os.replace(tmp, LEDGER)
+                    break
+                except PermissionError:
+                    time.sleep(0.25)
+        finally:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            lock.close()
 
     def month(self):
+        self.d = self._read()
         return self.d["by_month"].get(datetime.date.today().isoformat()[:7], 0)
 
     def check(self, s):
@@ -80,23 +126,50 @@ class Ledger:
 
     def ok(self, s):
         today = datetime.date.today().isoformat()
-        self.d["seconds"] += s
-        self.d["requests"] += 1
-        self.d["by_month"][today[:7]] = self.d["by_month"].get(today[:7], 0) + s
-        self.d["by_day"][today] = self.d["by_day"].get(today, 0) + s
-        self.save()
+
+        def add(d):
+            d["seconds"] += s
+            d["requests"] += 1
+            d["by_month"][today[:7]] = d["by_month"].get(today[:7], 0) + s
+            d["by_day"][today] = d["by_day"].get(today, 0) + s
+        self._update(add)
 
     def fail(self, code, msg):
         from tools.voice_audition import azure as AZR
-        self.d["failed"] += 1
-        self.d["errors"] = (self.d["errors"] + [{"at": datetime.datetime.now().isoformat(timespec="seconds"),
-                                                 "code": code, "message": AZR.scrub(msg)[:200]}])[-40:]
-        self.save()
+        row = {"at": datetime.datetime.now().isoformat(timespec="seconds"), "code": code,
+               "message": AZR.scrub(msg)[:200]}
 
-    def save(self):
-        tmp = LEDGER + ".tmp"
-        io.open(tmp, "w", encoding="utf-8").write(json.dumps(self.d, indent=1))
-        os.replace(tmp, LEDGER)
+        def add(d):
+            d["failed"] += 1
+            d["errors"] = (d["errors"] + [row])[-40:]
+        self._update(add)
+
+    def reconcile(self):
+        """The counts from the cache (every entry was one billed request: ceil(seconds), on its day)."""
+        by_m, by_d, n, tot = {}, {}, 0, 0
+        for dp, _, fs in os.walk(CACHE):
+            for f in fs:
+                if not f.endswith(".json"):
+                    continue
+                try:
+                    e = json.load(io.open(os.path.join(dp, f), encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                sec = int(math.ceil(e.get("seconds") or 0))
+                day = (e.get("at") or "")[:10]
+                n, tot = n + 1, tot + sec
+                by_m[day[:7]] = by_m.get(day[:7], 0) + sec
+                by_d[day] = by_d.get(day, 0) + sec
+
+        def put(d):
+            for k, v in by_m.items():          # never below what the ledger already counted (a cache can be pruned)
+                d["by_month"][k] = max(d["by_month"].get(k, 0), v)
+            for k, v in by_d.items():
+                d["by_day"][k] = max(d["by_day"].get(k, 0), v)
+            d["seconds"] = max(d["seconds"], tot)
+            d["requests"] = max(d["requests"], n)
+        self._update(put)
+        return {"cache_requests": n, "cache_seconds": tot, "by_month": self.d["by_month"]}
 
 
 _L = {"ledger": None, "last": 0.0}
@@ -187,11 +260,14 @@ def verdict(audio, lang):
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["hear", "ledger"])
+    ap.add_argument("cmd", choices=["hear", "ledger", "reconcile"])
     ap.add_argument("files", nargs="*")
     ap.add_argument("--lang", default="en")
     ap.add_argument("--context", action="store_true", help="Arabic: behind the bank's lead clip")
     a = ap.parse_args()
+    if a.cmd == "reconcile":
+        print(json.dumps(ledger().reconcile(), indent=1))
+        return
     if a.cmd == "ledger":
         L = ledger()
         print(json.dumps({k: L.d[k] for k in ("seconds", "requests", "failed", "by_month")}, indent=1))

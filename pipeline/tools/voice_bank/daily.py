@@ -237,7 +237,8 @@ def main(argv=None):
             step(rec, "en render (Azure)" + tag,
                  lambda: open_b("en").tts_round(order, ("en",), max_requests=a.max_requests))
             res = step(rec, "en judge" + tag, lambda: open_b("en").judge(order=order, langs=("en",)))
-            if not (isinstance(res, str) and res == "done") or not open_b("en").queue(order, ("en",)):
+            if not (isinstance(res, str) and res == "done") or not any(
+                    t > 1 for _, t in open_b("en").queue(order, ("en",))):
                 break
         step(rec, "en settle", lambda: "%d wait for a human listen" % open_b("en").settle())
     if not a.no_publish:
