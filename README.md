@@ -14,9 +14,10 @@ One rolling release, tag [`bank`](https://github.com/ibrahim212-wq/routemind-voi
   MPEG-2 Layer III frames, 24 kHz mono, 32 kbps. Packs never change; a later pack's clip replaces an earlier clip
   with the same name.
 
-Every clip passed the bank's checks before it was published: a blind listening model read it back (direction words
-and exit numbers heard inside a line, the addressee's gender, the Cairene accent), its pace and length were checked,
-and Arabic clips were also heard by a blind phone recogniser. Clips that did not pass are not here.
+Every clip passed the bank's checks before it was published: a blind speech recogniser (Azure speech-to-text) read
+it back (direction words and exit numbers heard, Arabic inside a line; the addressee's gender), its pace and length
+were checked, and Arabic clips were also heard by a blind phone recogniser (the Cairene ج and ق). Clips that did not
+pass are not here.
 
 ## Voices and credits
 
@@ -31,3 +32,11 @@ and Arabic clips were also heard by a blind phone recogniser. Clips that did not
 - The words (the phrasebook) are RouteMind's own.
 
 The clips are published for the RouteMind app. No licence is granted beyond what the providers' terms above allow.
+
+## How it is built
+
+`.github/workflows/voice-bank.yml` runs every day on GitHub-hosted minutes from `pipeline/` — a generated copy of
+the build code in the RouteMind app repository (never edited here). Every clip is read back by Azure speech-to-text
+(Arabic also by a blind phone recogniser) before it is packed. The work in progress (state, verdicts, rendered clips)
+is kept in the `work` prerelease — not for the app; the app reads the `bank` release only. `status/runs.jsonl` has one
+line per run.

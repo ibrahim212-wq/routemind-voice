@@ -1,0 +1,163 @@
+# The navigation voice bank, built daily on GitHub-hosted minutes (docs/voice-bank-publish-2026-10.md §7 in the app
+# repository). GENERATED: this file is cairoWay/tools/voice_bank/ci/voice-bank.yml, installed by
+# `python tools/voice_bank/mirror.py push` — never edit it here.
+#
+# One run = pull the work state (the `work` prerelease) → tools.voice_bank.daily (Arabic on the free Gemini TTS until
+# the day's quota, English on Azure, every clip read back by Azure speech-to-text + the blind phone listener, the
+# QA-passed clips to the `bank` release: packs first, manifest LAST) → push the work state back (always).
+# A run that stops on the Gemini quota is a CLEAN stop (exit 0); the next run resumes where it stopped.
+name: voice bank
+
+on:
+  schedule:
+    - cron: "7 7 * * *"     # the free Gemini quota resets at midnight Pacific = 07:00 UTC (US daylight time)
+    - cron: "7 8 * * *"     # = 08:00 UTC from 2026-11-01 (US standard time); the run that finds it spent stops at once
+  workflow_dispatch:
+    inputs:
+      langs:
+        description: "languages (ar,en | ar | en)"
+        default: "ar,en"
+      max_requests:
+        description: "at most N TTS requests per language (empty = until the quota)"
+        default: ""
+      publish:
+        description: "publish the passing clips"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: voice-bank
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      VOICE_BANK_OUT: /home/runner/vb/work
+      VOICE_AUDITION_OUT: /home/runner/vb/work/audition
+      VOICE_BANK_INVENTORY: ${{ github.workspace }}/pipeline/data/inventory.json
+      HF_HOME: /home/runner/vb/hf
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUNBUFFERED: "1"
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: bash
+        working-directory: pipeline
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pipeline/tools/voice_bank/ci/requirements.txt
+
+      - name: ffmpeg
+        run: |
+          sudo apt-get update -q >/dev/null
+          sudo apt-get install -y -q --no-install-recommends ffmpeg >/dev/null
+          ffmpeg -version | head -1
+
+      - name: python packages
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -q -r tools/voice_bank/ci/requirements.txt
+
+      - name: the phone listener's model (cached once per runner image)
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/vb/hf
+          key: hf-wav2vec2-xlsr-53-espeak-cv-ft-v1
+
+      - name: fetch the model when the cache missed
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from tools.masri_voice import phones
+          print(snapshot_download(phones.MODEL, allow_patterns=["*.json", "*.bin"]))
+          PY
+
+      - name: keys → files (repository secrets; never printed)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
+          AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
+        run: |
+          umask 077
+          d="$RUNNER_TEMP/keys"; mkdir -p "$d"
+          printf '%s' "$GEMINI_API_KEY" > "$d/gemini"
+          printf '%s' "$AZURE_SPEECH_KEY" > "$d/azure_key"
+          printf '%s' "$AZURE_SPEECH_REGION" > "$d/azure_region"
+          for f in gemini azure_key azure_region; do [ -s "$d/$f" ] || { echo "::error::secret $f is empty"; exit 1; }; done
+          {
+            echo "ROUTEMIND_GEMINI_KEY_FILE=$d/gemini"
+            echo "AZURE_SPEECH_KEY_FILE=$d/azure_key"
+            echo "AZURE_SPEECH_REGION_FILE=$d/azure_region"
+          } >> "$GITHUB_ENV"
+
+      - name: pull the work state
+        run: python -m tools.voice_bank.work pull
+
+      - name: the daily run
+        id: run
+        run: |
+          set -o pipefail
+          args=(--lang "${{ inputs.langs || 'ar,en' }}")
+          [ -n "${{ inputs.max_requests }}" ] && args+=(--max-requests "${{ inputs.max_requests }}")
+          [ "${{ inputs.publish }}" = "false" ] && args+=(--no-publish)
+          python -m tools.voice_bank.daily "${args[@]}" 2>&1 | tee "$VOICE_BANK_OUT/last_run.log"
+
+      - name: push the work state (always)
+        if: always()
+        run: python -m tools.voice_bank.work push
+
+      - name: progress
+        if: always()
+        run: |
+          python -m tools.voice_bank.daily --status | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: keep a copy of the state (artifact, 30 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-bank-state-${{ github.run_id }}
+          path: |
+            /home/runner/vb/work/**/state.json
+            /home/runner/vb/work/daily_status.json
+            /home/runner/vb/work/stt_ledger.json
+            /home/runner/vb/work/audition/limits.json
+            /home/runner/vb/work/audition/azure/ledger.json
+            /home/runner/vb/work/last_run.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: record the run (a commit a day keeps the schedule alive)
+        if: always()
+        working-directory: .
+        run: |
+          python - <<'PY'
+          import json, os, datetime
+          p = os.path.join(os.environ["VOICE_BANK_OUT"], "daily_status.json")
+          last = json.load(open(p, encoding="utf-8")).get("last", {}) if os.path.exists(p) else {}
+          row = {"at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "run": os.environ.get("GITHUB_RUN_ID"), "event": os.environ.get("GITHUB_EVENT_NAME"),
+                 "steps": [[s.get("step"), str(s.get("result"))[:160]] for s in last.get("steps", [])],
+                 "published": {k: (v or {}).get("published") for k, v in (last.get("progress") or {}).items()},
+                 "arabic_days": (last.get("arabic_days") or {}).get("days_left_at_10_requests")}
+          os.makedirs("status", exist_ok=True)
+          open("status/runs.jsonl", "a", encoding="utf-8").write(json.dumps(row, ensure_ascii=False) + "\n")
+          PY
+          git config user.name "voice-bank workflow"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add status/runs.jsonl
+          git commit -q -m "status: run ${GITHUB_RUN_ID}" && git push -q || echo "nothing recorded"
+
+      - name: forget the keys
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"

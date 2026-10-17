@@ -1,0 +1,6 @@
+# The voice-bank workflow's Python packages (torch comes from the CPU wheel index, pinned in the workflow).
+# Pinned to the desk's versions: the blind phone listener's IPA must not move under the bank between runs.
+numpy==2.4.1
+scipy==1.17.1
+transformers==5.17.0
+huggingface_hub==1.10.2
