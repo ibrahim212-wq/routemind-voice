@@ -218,8 +218,14 @@ def main(argv=None):
 
         def render_ar():
             b = open_b("ar")
-            if not (b.s.get("calibration") or {}).get("decision"):
-                return "waiting for the calibration"
+            cal = b.s.get("calibration") or {}
+            if not cal.get("decision"):
+                plans = cal.get("plans") or {}
+                if not plans or not all(p.get("made") for p in plans.values()):
+                    return "waiting for the calibration"
+                # every calibration request is made but its verdicts wait (the judge could not run): the day's other
+                # requests are not wasted — they go at the base size the calibration measures against
+                A.log("  the calibration's verdicts wait: today's requests at the base size (%d)" % b.cfg["batch_ar"])
             # Sekka's live test rides at the end of the first request (no request of its own: sekka_live.py)
             ex = SK.extras() if SK.pending() else None
             return b.tts_round(order, ("ar",), max_requests=a.max_requests, extras=ex, on_extras=SK.record)
