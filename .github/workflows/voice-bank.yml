@@ -102,6 +102,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: pull the work state
+        id: pull
         run: python -m tools.voice_bank.work pull
 
       - name: the daily run
@@ -113,12 +114,12 @@ jobs:
           [ "${{ inputs.publish }}" = "false" ] && args+=(--no-publish)
           python -m tools.voice_bank.daily "${args[@]}" 2>&1 | tee "$VOICE_BANK_OUT/last_run.log"
 
-      - name: push the work state (always)
-        if: always()
+      - name: push the work state (always — but never a state this run did not pull)
+        if: always() && steps.pull.outcome == 'success'
         run: python -m tools.voice_bank.work push
 
       - name: progress
-        if: always()
+        if: always() && steps.pull.outcome == 'success'
         run: |
           python -m tools.voice_bank.daily --status | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -138,7 +139,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: record the run (a commit a day keeps the schedule alive)
-        if: always()
+        if: always() && steps.pull.outcome == 'success'
         working-directory: .
         run: |
           python - <<'PY'
