@@ -250,7 +250,7 @@ def pull(out, lead_dst=None):
                         with open(dst, "wb") as fh:
                             fh.write(t.extractfile(ti).read())
                 log("unpacked %s (%.1f KB)" % (name, len(data) / 1024.0))
-            elif name == "context_lead.mp3" and lead_dst:
+            elif name == "context_lead.mp3" and lead_dst and not os.path.exists(lead_dst):    # the desk has it
                 os.makedirs(os.path.dirname(lead_dst), exist_ok=True)
                 open(lead_dst, "wb").write(data)
                 log("lead clip → %s" % lead_dst)
