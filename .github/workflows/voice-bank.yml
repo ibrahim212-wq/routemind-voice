@@ -105,6 +105,18 @@ jobs:
         id: pull
         run: python -m tools.voice_bank.work pull
 
+      - name: the phone listener answers (one clip, offline)
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: |
+          python - <<'PY'
+          import os
+          from tools.masri_voice import build_bank, masri_voice as mv, phones
+          from tools.voice_audition import audition as A
+          p = os.path.join(mv.ROOT, "assets", "voice", "ar", mv.fnv64(build_bank.CONTEXT_LEAD) + ".mp3")
+          print("the lead clip heard as:", phones.ipa_wav(A.mp3_to_wav(p)))
+          PY
+
       - name: the daily run
         id: run
         run: |

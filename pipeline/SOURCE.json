@@ -26,7 +26,7 @@
   "tools/voice_bank/banks.py": "61a4024cd26d4290ef7e0ae7767f8f08b84e9f2a449980c8c702cf085cfb7f34",
   "tools/voice_bank/build.py": "bbe78240eac5ea832c08d64d7f2c10f62bbed015a75470c6428d76c585eebf62",
   "tools/voice_bank/ci/requirements.txt": "b0580a99410e743b12e0d60b4ec71e7003e2508a522a8b76757ebc1baaa8694c",
-  "tools/voice_bank/ci/voice-bank.yml": "00615b9c944e34b4ea1472add34a8356043bae5e29af9d19e14bb21156e5bca2",
+  "tools/voice_bank/ci/voice-bank.yml": "3c3bd7d0aa2a85ea920c2027ec5845688e60f31c5792ab5ac2f0a240578d12e1",
   "tools/voice_bank/daily.py": "75500e116d21ec77041a831d1847a821432d52a0fc1dd754f718a85c1e76ab63",
   "tools/voice_bank/gemini_tts.py": "2c87844054757512e2a5b4bb49727ac031ca9fc8ead7df44a41fe6a8b40818ad",
   "tools/voice_bank/inventory.py": "f73b7cdb19fc14e330851e12bcb78fa639e0ef1514d8a4a33100f1ea530f5933",
