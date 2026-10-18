@@ -39,7 +39,10 @@ KEY_FILE = os.environ.get("AZURE_SPEECH_KEY_FILE", r"C:\Users\ibrah\routemind-se
 REGION_FILE = os.environ.get("AZURE_SPEECH_REGION_FILE", r"C:\Users\ibrah\routemind-secrets\azure_speech_region.txt")
 
 MONTHLY_F0 = 500_000
-AUDITION_CAP = 60_000          # this desk's audition + tuning + Sekka tests, all runs (the bank needs the rest)
+AUDITION_CAP = 108_000         # this desk's audition + tuning + Sekka tests, all runs (the bank needs the rest); 60,000 until
+                               # 2026-10-18, raised by 40,000 for the female Arabic study (docs/azure-voice-2026-10.md §9) and by
+                               # 8,000 for Sekka's pre-recorded tap openings (tools/voice_audition/sekka_prerecord.py; the month's
+                               # F0 allowance, 500,000, is far from spent: ~135,000 on 2026-10-18)
 MIN_GAP_S = 3.2                # 20 requests / 60 s on F0 → one every 3 s (+ a margin)
 WAV_FMT = "riff-24khz-16bit-mono-pcm"
 MP3_FMT = "audio-24khz-48kbitrate-mono-mp3"   # what Sekka's /speak sends the phones

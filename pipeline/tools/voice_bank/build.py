@@ -71,6 +71,7 @@ from tools.masri_voice import masri_voice as mv
 from tools.masri_voice import pronounce
 from tools.voice_audition import audition as A
 from tools.voice_bank import align as AL
+from tools.voice_bank import en_say as ES
 from tools.voice_bank import inventory as INV
 
 OUT = os.environ.get("VOICE_BANK_OUT", "G:/grad_all/.p5work/voice_bank")
@@ -221,6 +222,8 @@ class Build:
             return False
         if self.cfg["provider"] == "azure":       # deterministic: only a different input is a new take
             if r["lang"] == "en":
+                if ES.variants(r["seg"]):         # a spoken-form override: one take per variant (en_say.py)
+                    return len(r["takes"]) < len(ES.variants(r["seg"]))
                 return len(r["takes"]) < 1 + len(EN_RETAKE_RATES)
             return pronounce.variants(r["seg"]) > len(r["takes"])
         return True
@@ -228,6 +231,7 @@ class Build:
     def queue(self, order, langs=("ar", "en"), first=None):
         """[(segment, take number)] still to render — first takes and retakes together, in build order (`prio`)."""
         firsts = {(x["lang"], x["seg"]) for x in order[:first]} if first else None
+        self.apply_en_say()
         out = []
         for x in order:
             if x["lang"] not in langs or (firsts is not None and (x["lang"], x["seg"]) not in firsts):
@@ -245,7 +249,37 @@ class Build:
     def todo(self, order):                          # (kept for callers of the first version)
         return [x for x, t in self.queue(order, (self.a.lang,) if self.a.lang != "all" else ("ar", "en")) if t == 1]
 
+    def apply_en_say(self):
+        """A segment whose English spoken-form override (en_say.py) is new or changed, and that has no passing take, is
+        rendered afresh: its earlier takes (made from the written text or an older override) are archived under
+        `old_takes` and their clip files moved aside (encode_mp3 never overwrites). → how many were reset."""
+        n = 0
+        for r in self.s["segs"].values():
+            if r["lang"] != "en":
+                continue
+            oid = ES.override_id(r["seg"])
+            if oid is None or r.get("say_id") == oid or any(t.get("pass") for t in r["takes"]):
+                continue
+            for t in r["takes"]:
+                src = os.path.join(self.dir, t["clip"])
+                if os.path.exists(src):
+                    k = 0
+                    while os.path.exists("%s.old%d" % (src, k)):
+                        k += 1
+                    os.replace(src, "%s.old%d" % (src, k))
+                    t["clip"] = os.path.relpath("%s.old%d" % (src, k), self.dir).replace(os.sep, "/")
+            r.setdefault("old_takes", []).extend(r["takes"])
+            r.update(takes=[], status="pending", say_id=oid, errors=0)
+            r.pop("last_error", None)
+            n += 1
+        if n:
+            self.save()
+        return n
+
     def text_for(self, seg, lang, take):
+        if lang == "en":                    # the words the voice is asked to say (en_say.py), else the segment
+            v = ES.variant(seg, take)
+            return ES.plain_of(v) if v else seg
         if lang != "ar":
             return seg
         t = pronounce.say(seg, (take - 1) % pronounce.variants(seg))
@@ -272,7 +306,12 @@ class Build:
         from tools.voice_audition import azure as AZR
         lang = group[0]["lang"]
         texts = [self.text_for(x["seg"], lang, t) for x, t in zip(group, takes)]
-        if lang == "en" and len(group) == 1 and takes[0] > 1:     # an English retake: the same words, another rate
+        v = ES.variant(group[0]["seg"], takes[0]) if lang == "en" and len(group) == 1 else None
+        if v:                                  # a spoken-form override: its SSML body and its own rate (en_say.py)
+            doc = AZR.ssml(None, self.cfg["voice_en"], "en", rate=v.get("rate") or self.cfg["en_rate"] or None,
+                           pitch=self.cfg["en_pitch"] or None, style=self.cfg.get("en_style") or None,
+                           body_xml=v["ssml"])
+        elif lang == "en" and len(group) == 1 and takes[0] > 1:   # an English retake: the same words, another rate
             doc = az_doc(dict(self.cfg, en_rate=EN_RETAKE_RATES[min(takes[0], 1 + len(EN_RETAKE_RATES)) - 2]),
                          texts, lang)
         else:
@@ -382,6 +421,10 @@ class Build:
                    "gate": gate, "listens": [], "verdict": None, "phones": None, "pass": None,
                    "first_audio_s": meta.get("first_audio_s"), "recovered": bool(recovered),
                    "req": meta.get("key") if (gem and k > 2) else None}
+            if x["lang"] == "en" and ES.variant(x["seg"], t_no):
+                rec["spoken"] = ES.plain_of(ES.variant(x["seg"], t_no))      # the judge reads back against this
+                rec["say_id"] = ES.override_id(x["seg"])
+                r["say_id"] = rec["say_id"]
             if is_cal:
                 cal.setdefault(x["seg"], {})[str(k)] = rec
                 continue
@@ -859,7 +902,8 @@ class Build:
                 return                             # this clip is heard again by the next run
             t["phones"] = ph
         stt = str(v.get("_judge_model") or "").startswith("azure-stt")
-        chk = (read_back_stt(r, v.get("transcript", ""), v.get("itn", ""), lead=EN_LEAD if v.get("context") else None)
+        rr = dict(r, spoken=t["spoken"]) if t.get("spoken") else r      # an overridden segment: its SPOKEN form
+        chk = (read_back_stt(rr, v.get("transcript", ""), v.get("itn", ""), lead=EN_LEAD if v.get("context") else None)
                if stt else read_back(r, v.get("transcript", "")))
         # the STT read-back hears words, not the accent: for Arabic the dialect is the phone listener's (no hard flag)
         dialect = (None if stt else A.dialect_ok(v)) if r["lang"] == "ar" else None
@@ -1042,7 +1086,7 @@ def build_bank_wav(x, rate):
 
 
 def _read_back_en(r, heard):
-    src, got = _en_norm(r["seg"]), _en_norm(heard)
+    src, got = _en_norm(r.get("spoken") or r["seg"]), _en_norm(heard)
     crit = en_critical(src, got)
     if r.get("cat") == "road":
         # "onto <name> <type>": the TYPE word heard; everything before it (the recogniser glues "onto" to the name:

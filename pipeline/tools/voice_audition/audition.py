@@ -2451,6 +2451,11 @@ def write_page(R):
         data["sekka"] = sekka_summary(R)
     except Exception as e:                    # the page never fails on the Sekka tab
         data["sekka"] = {"error": scrub("%s: %s" % (type(e).__name__, e))[:300]}
+    try:                                       # the female Arabic study (2026-10-18, docs/azure-voice-2026-10.md §9)
+        from tools.voice_audition import sekka_ar
+        data["sekka_ar"] = sekka_ar.page_data()
+    except Exception as e:
+        data["sekka_ar"] = {"error": scrub("%s: %s" % (type(e).__name__, e))[:300]}
     for t in takes:
         if t["group"].startswith("sekka-"):
             t["score"] = score_sekka_en(t) if t["lang"] == "en" else score_sekka_ar(t)
@@ -2531,7 +2536,7 @@ const LINES = Object.fromEntries(D.lines.map(l => [l.id, l]));
 const short = m => m.replace("gemini-","").replace("-preview","·pv");
 const isAz = t => String(t.model||"").startsWith("azure");
 const AZG = {"azure":1,"azure-tune":1,"azure-screen":1,"azure-batch":1,"azure-batch-single":1};
-const tabs = [["line","By line"],["sekka","Sekka (live)"],["azure","Azure"],["voice","By voice"],["screen","Pre-screen"],["batch","Batch test"],["limits","Limits & missing"],["about","How"]];
+const tabs = [["line","By line"],["sekka","Sekka (live)"],["skar","Sekka Arabic — female Azure (2026-10-18)"],["azure","Azure"],["voice","By voice"],["screen","Pre-screen"],["batch","Batch test"],["limits","Limits & missing"],["about","How"]];
 const isSk = t => String(t.group||"").startsWith("sekka-");
 let cur = "line";
 try { cur = localStorage.getItem("va_tab") || "line"; } catch(e) {}
@@ -2781,6 +2786,47 @@ function viewSekka(){
   }
   return h+`</section>`;
 }
+function viewSkAr(){
+  const S=D.sekka_ar||{}; if(S.error) return `<div class="panel">Sekka Arabic study failed: ${esc(S.error)}</div>`;
+  const aud=c=>c?`<audio controls preload="none" src="${esc(c)}"></audio>`:"";
+  const flags=t=>(t.hard&&t.hard.length)?t.hard.map(h=>`<span class="chip fail">${esc(h)}</span>`).join(" "):`<span class="chip pass">0 hard flags</span>`;
+  const stt=t=>t.stt?`<span class="chip ${t.stt.ok?'pass':'fail'}">read-back CER ${esc(t.stt.cer)}</span>`:"";
+  const pk=S.pick;
+  let h=`<section class="panel"><h2 style="margin-top:0">Sekka's Arabic voice — every female Azure voice that can speak Arabic, measured on 40 Cairene replies</h2>
+   <p class="small">Judges: the blind phone listener (tools/masri_voice/phones.py — q for ق, dʒ for ج, θ/ð, Modern-Standard endings, garbled consonants; the authority on sounds) and the Azure STT read-back (ar-EG) where its seconds allow. Reference = Gemini Despina, the navigation bank's voice. NOTHING here is live: the owner listens and decides.</p>
+   ${pk?`<p><b>Pick:</b> ${esc(pk.summary||"")}</p>`:`<p>No pick recorded yet.</p>`}</section>`;
+  if((S.despina||[]).length){
+    h+=`<section class="panel"><h2 style="margin-top:0">Reference — Gemini Despina (the navigation bank's voice, today's audition takes)</h2><div class="grid">`+S.despina.map(d=>`<div class="take"><div class="ar">${esc(d.text)}</div>${aud(d.clip)}<div class="small">${(d.hard&&d.hard.length)?esc(d.hard.join(" · ")):"phone listener: 0 hard flags"}</div></div>`).join("")+`</div><p class="small">Despina's Sekka replies (tools.voice_bank.sekka_live) are not recorded yet: the bank's daily run has not reached them.</p></section>`;
+  }
+  if((S.matrix||[]).length){
+    h+=`<section class="panel"><h2 style="margin-top:0">Score — replies with 0 hard flags, per voice × method</h2><div class="scroll"><table><tr><th>voice</th><th>method</th><th>diacritizer</th><th>takes</th><th>phone listener 0 hard</th><th>flagged lines by kind</th><th>read-back</th><th>0 flags + read-back ok</th><th>chars / reply</th><th>first byte p50 / p90</th></tr>`;
+    for(const m of S.matrix) h+=`<tr><td>${esc(m.voice)}</td><td>${esc(m.method)}</td><td>${esc(m.variant)}</td><td class="num">${m.n}/${m.of}</td><td class="num"><b>${m.phone_pass}/${m.n}</b></td><td class="small">${esc(Object.entries(m.flag_lines).map(([k,v])=>k+" "+v).join(", ")||"none")}</td><td class="num">${m.stt_n?m.stt_pass+"/"+m.stt_n:"–"}</td><td class="num">${m.stt_n?m.both_of_stt+"/"+m.stt_n:"–"}</td><td class="num">${esc(m.chars_mean??"")}</td><td class="num">${esc(m.ttfb_p50??"")} / ${esc(m.ttfb_p90??"")} s</td></tr>`;
+    h+=`</table></div></section>`;
+  }
+  if((S.probe||[]).length){
+    const cnt={}; S.probe.forEach(p=>cnt[p.verdict]=(cnt[p.verdict]||0)+1);
+    h+=`<section class="panel"><h2 style="margin-top:0">ج probe — all ${S.probe.length} candidates on «فيه زحمة جامدة جنب الجامعة»</h2><p class="small">${esc(Object.entries(cnt).map(([k,v])=>k+": "+v).join(" · "))}. g = every ج heard as a hard g (what Cairo says); dʒ = Modern-Standard ج; dropped = a d / nothing.</p><div class="scroll"><table><tr><th>voice</th><th>family</th><th>ج</th><th>first byte</th><th>listen</th></tr>`;
+    for(const p of S.probe.slice().sort((a,b)=>(a.verdict==="g"?0:1)-(b.verdict==="g"?0:1)||a.voice.localeCompare(b.voice))) h+=`<tr><td>${esc(p.voice)}</td><td>${esc(p.family||"")}</td><td><span class="chip ${p.verdict==='g'?'pass':'fail'}">${esc(p.verdict)}</span></td><td class="num">${esc(p.ttfb)} s</td><td style="min-width:220px">${aud(p.clip)}</td></tr>`;
+    h+=`</table></div></section>`;
+  }
+  if((S.screen||[]).length){
+    h+=`<section class="panel"><h2 style="margin-top:0">Hard-line screen (4 lines, the diacritized text, no prosody)</h2><div class="scroll"><table><tr><th>voice</th><th>0 hard flags</th><th>flagged lines by kind</th><th>first byte p50</th></tr>`;
+    for(const m of S.screen.slice().sort((a,b)=>b.phone_pass-a.phone_pass)) h+=`<tr><td>${esc(m.voice)}</td><td class="num"><b>${m.phone_pass}/${m.n}</b></td><td class="small">${esc(Object.entries(m.flag_lines).map(([k,v])=>k+" "+v).join(", ")||"none")}</td><td class="num">${esc(m.ttfb_p50)} s</td></tr>`;
+    h+=`</table></div></section>`;
+  }
+  for(const g of Object.keys(S.others||{})){
+    h+=`<section class="panel"><h2 style="margin-top:0">${esc(g)}</h2><div class="scroll"><table><tr><th>voice</th><th>method</th><th>variant</th><th>text sent</th><th>phones heard</th><th>flags</th><th>listen</th></tr>`;
+    for(const t of S.others[g]) h+=`<tr><td>${esc(t.voice)}</td><td>${esc(t.method)}</td><td class="small">${esc(t.variant)} ${esc(t.note||"")}</td><td class="ar small">${esc(t.text)}</td><td class="small">${esc(t.ipa||t.error||"")}</td><td>${flags(t)}</td><td style="min-width:200px">${aud(t.clip)}</td></tr>`;
+    h+=`</table></div></section>`;
+  }
+  for(const L of (S.lines||[])){
+    if(!(L.takes||[]).length) continue;
+    h+=`<section class="panel"><h3 style="margin-top:0">${esc(L.id)} · to a ${L.addr==="f"?"woman":(L.addr==="m"?"man":"anyone")} · ${esc((L.tags||[]).join(", "))}</h3><div class="ar">${esc(L.text)}</div>`+Object.entries(L.dia||{}).map(([m,v])=>`<div class="small">${esc(m)}:</div><div class="say">${esc(v)}</div>`).join("")+`<div class="grid" style="margin-top:6px">`;
+    for(const t of L.takes) h+=`<div class="take"><b>${esc(t.voice.replace("Neural",""))}</b> · ${esc(t.method)} · ${esc(t.variant)} <span class="small">${esc(t.chars)} chars · first byte ${esc(t.ttfb)} s</span><div>${flags(t)} ${stt(t)}</div>${t.stt?`<div class="small">heard: ${esc(t.stt.heard)}</div>`:""}${aud(t.clip)}</div>`;
+    h+=`</div></section>`;
+  }
+  return h;
+}
 function viewAbout(){
   return `<section class="panel"><h2 style="margin-top:0">How these takes were made</h2>
   <p>Every take: <b>${esc(D.main_model)}</b> (or the compared model), one prebuilt voice, a director's-notes prompt (only the transcript is spoken). Arabic lines are the app's own (tools/masri_voice/masri_voice.py, masculine addressee); the voice reads the bank build's spelling (pronounce.py SAY). Each take is trimmed and levelled like a bank clip (build_bank.process) and encoded in the bank's format (MP3 24 kHz mono 32 kbps), so it plays at the same level as the CURRENT clip beside it.</p>
@@ -2789,7 +2835,7 @@ function viewAbout(){
 }
 function render(){
   $("#tabs").innerHTML=tabs.map(([k,n])=>`<button type="button" data-k="${k}" class="${k===cur?'on':''}">${n}</button>`).join("");
-  $("#main").innerHTML=({line:viewLine,sekka:viewSekka,azure:viewAzure,voice:viewVoice,screen:viewScreen,batch:viewBatch,limits:viewLimits,about:viewAbout}[cur]||viewLine)();
+  $("#main").innerHTML=({line:viewLine,sekka:viewSekka,skar:viewSkAr,azure:viewAzure,voice:viewVoice,screen:viewScreen,batch:viewBatch,limits:viewLimits,about:viewAbout}[cur]||viewLine)();
   const lf=$("#lf"), ob=$("#onlybest");
   const apply=()=>{ document.querySelectorAll("section[data-lang]").forEach(s=>s.style.display=(lf.value==="all"||s.dataset.lang===lf.value)?"":"none");
     document.querySelectorAll("[data-take]").forEach(d=>{ const sec=d.closest("section"); const hasRetake=sec.querySelector('[data-take="2"]'); d.style.display=(ob.checked&&((d.dataset.take==="1"&&hasRetake&&d.dataset.pass==="false")))?"none":""; }); };
