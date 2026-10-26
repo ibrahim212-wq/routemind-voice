@@ -300,8 +300,11 @@
     "qm.arrive.long": [{"m": "حمد الله على السلامة، المشوار كان طويل، ارتاح شوية.", "f": "حمد الله على السلامة، المشوار كان طويل، ارتاحي شوية."}]
   },
   "english": {
-    "_note": "English guidance: the provider's own announcement the FIRST time a maneuver is named (it carries the road names); once told, a brief line composed from the maneuver data - [remind, now]. 'remind' follows the lead 'In {D}, '; 'now' is the whole line at the maneuver. Mirrored by MasriVoice.briefEn (py/kt/swift).",
+    "_note": "English guidance, composed from the maneuver data like the Arabic (2026-10-25: the provider's free text played from the bank only 45 % of the time): the FIRST line about a maneuver gives the whole picture - the action, the road it leads onto when the bank can say it (onto), the roundabout (at_rb), the destination's side - and once told a brief line - [remind, now]; a CONTINUE line is the banded distance (continue). 'remind' follows the lead 'In {D}, '; 'now' is the whole line at the maneuver. Mirrored by MasriVoice.briefEn (py/kt/swift).",
     "lead": "In {D}, ",
+    "continue": "Continue for {D}.",
+    "onto": " onto {R}",
+    "at_rb": "at the roundabout, ",
     "then": " Then {A}.",
     "meters": "{N} meters",
     "kilometer": "1 kilometer",

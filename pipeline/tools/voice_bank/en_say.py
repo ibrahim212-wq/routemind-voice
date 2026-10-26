@@ -71,6 +71,49 @@ EN_SAY["onto Al Doctor Kamal Al Ganzori Axis,"] = [
     {"ssml": "onto El Doctor Kamal El Ganzouri " + _BRK % 120 + "Axis,"},
     {"ssml": "onto Doctor Kamal El Ganzouri " + _BRK % 120 + "Axis,"}]
 
+# REDO — published clips that passed the bank's judge but that NO listener of the full-bank verification hears right
+# (tools/voice_bank/verify_bank.py --final, 2026-10-26: Whisper base + small, Azure's cached read-back, Gemini 3.5 —
+# docs/english-voice-2026-10.md §4). Their variants below were picked on the desk the same day (the voice rendered,
+# both Whisper models hearing the words); a REDO segment is rendered afresh EVEN THOUGH it has a passing take, and that
+# take stays the published one until a new take passes (build.Build.apply_en_say / published_take).
+_BEAR = '<phoneme alphabet="ipa" ph="bɛɹ">Bear</phoneme>'
+REDO = {
+    "bear left": "heard «they're left» by every listener",
+    "bear right.": "heard «they're right» by every listener",
+    "Bear right.": "heard «they're right» by every listener",
+    "Okay, switched to the faster route.": "heard «switch to» — the -ed lost in «switched to»",
+    "Then take the sixth exit.": "heard «sixth section» / «six sexit» — «exit» lost",
+    "onto Al Dekhela Desert Street.": "heard «until dicla» / «untold liquid treats»",
+    "onto El-Dabaa Axis,": "heard «the other axis» / «on 12 axis»",
+}
+EN_SAY.update({
+    "bear left": [
+        {"ssml": '<prosody rate="-12%">Bear</prosody> left', "plain": "bear left"},
+        {"ssml": _BEAR + " left", "plain": "bear left"},
+        {"ssml": '<prosody rate="-12%">' + _BEAR + "</prosody> left", "plain": "bear left"}],
+    "Okay, switched to the faster route.": [
+        {"ssml": "Okay, switched " + _BRK % 80 + "to the faster route."},
+        {"ssml": "Okay, switched " + _BRK % 110 + "to the faster route."},
+        {"ssml": "Okay, switched " + _BRK % 60 + "to the faster route."}],
+    "Then take the sixth exit.": [
+        {"ssml": 'Then take the <prosody rate="-10%">sixth exit</prosody>.', "plain": "Then take the sixth exit."},
+        {"ssml": "Then take the sixth " + _BRK % 80 + "exit."},
+        {"ssml": 'Then take the <prosody rate="-16%">sixth exit</prosody>.', "plain": "Then take the sixth exit."}],
+    "onto Al Dekhela Desert Street.": [
+        {"ssml": "onto " + _BRK % 100 + "El Dekheila Desert Street."},
+        {"ssml": "onto " + _BRK % 100 + "El De-khay-la Desert Street."},
+        {"ssml": "onto " + _BRK % 100 + "Al Dekhela " + _BRK % 60 + "Desert Street."}],
+    "onto El-Dabaa Axis,": [
+        {"ssml": "onto " + _BRK % 100 + "El Dab-ah " + _BRK % 80 + "Axis,"},
+        {"ssml": "onto " + _BRK % 100 + "Ed Dabaa " + _BRK % 120 + "Axis,"},
+        {"ssml": "onto " + _BRK % 100 + "El Dabaa " + _BRK % 120 + "Axis,"}],
+})
+for _seg in ("bear right.", "Bear right."):
+    EN_SAY[_seg] = [
+        {"ssml": '<prosody rate="-12%">' + _BEAR + "</prosody> right.", "plain": "bear right."},
+        {"ssml": '<prosody rate="-12%">Bear</prosody> right.', "plain": "bear right."},
+        {"ssml": _BEAR + " right.", "plain": "bear right."}]
+
 _TAG = re.compile(r"<[^>]+>")
 
 

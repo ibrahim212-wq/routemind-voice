@@ -322,10 +322,11 @@ def rb_direction(angle, lht):
 
 
 class Maneuver:
-    __slots__ = ("type", "modifier", "exit", "degrees", "driving_side")
+    __slots__ = ("type", "modifier", "exit", "degrees", "driving_side", "road")
 
-    def __init__(self, type=None, modifier=None, exit=None, degrees=None, driving_side="right"):
+    def __init__(self, type=None, modifier=None, exit=None, degrees=None, driving_side="right", road=None):
         self.type, self.modifier, self.exit, self.degrees, self.driving_side = type, modifier, exit, degrees, driving_side
+        self.road = road   # the step's name: the road the maneuver leads onto (English first lines name it)
 
 
 def family(man, last_leg=True):
@@ -526,7 +527,7 @@ def route_line(maneuvers, step_idx, instr_idx, instr_count, dist_m, fem=False, l
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
-# ENGLISH — the provider's words the first time, a brief line once told (the same stages)
+# ENGLISH — composed like the Arabic: the whole picture the first time, a brief line once told
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 def en_dist(band):
     """200 → "200 meters" · 1000 → "1 kilometer" · 1500 → "1.5 kilometers" · 12000 → "12 kilometers"."""
@@ -575,11 +576,57 @@ def brief_en(kind, man, dist_m, then_man=None, then_gap_m=None, last_leg=True):
     return out
 
 
+def en_road(man, fam):
+    """The road a maneuver leads onto, when its line may name it: never an arrival's, never a U-turn's (the
+    provider's «to stay on X» names the road the car is on, not one it turns onto)."""
+    r = (getattr(man, "road", None) or "").strip()
+    if not r or fam[0] in ("arrive", "waypoint", "uturn"):
+        return ""
+    return r
+
+
+def first_en(kind, man, dist_m, then_man=None, then_gap_m=None, last_leg=True, can_say=None):
+    """The FIRST English line about a maneuver — the whole picture, composed from its data like the Arabic one
+    (2026-10-25). It replaced the provider's free text, whose road names and phrasings the bank could not play: on 54
+    desk routes 45 % of first lines played from the bank, every other one fell to the device voice. The road the
+    maneuver leads onto is named when the host's bank can play the line (`can_say(line)`; None = always), else the
+    line ends at the action; the destination's side is said at the arrival; a CONTINUE line says the banded distance.
+    Every piece is a bank segment (tools/voice_audition/bank_plan.english_segments)."""
+    lead = EN["lead"].replace("{D}", en_dist(dist_band(dist_m)))
+    if kind == CONTINUE:
+        return EN["continue"].replace("{D}", en_dist(dist_band(dist_m)))
+    fam = family(man, last_leg)
+    if fam[0] in ("arrive", "waypoint"):
+        if kind != FINAL:
+            return lead + en_action(fam, 0) + "."
+        if fam[1] == "none":
+            return en_action(fam, 1)
+        return en_action(fam, 1).rstrip(".") + ", " + en_action(fam, 0) + "."
+    then = EN["then"].replace("{A}", en_action(family(then_man, last_leg), 0)) \
+        if then_included(kind, man, then_man, then_gap_m, last_leg) else ""
+
+    def build(road):
+        onto = EN["onto"].replace("{R}", road) if road else ""
+        if kind == FINAL:
+            act = en_action(fam, 1)
+            return (act.rstrip(".") + "," + onto + "." if road else act) + then
+        intro = EN["at_rb"] if fam[0] == "rb" and fam[2] >= 1 else ""
+        return lead + intro + en_action(fam, 0) + onto + "." + then
+
+    road = en_road(man, fam)
+    if road:
+        out = build(road)
+        if can_say is None or can_say(out):
+            return out
+    return build("")
+
+
 def route_line_en(maneuvers, step_idx, instr_idx, instr_count, dist_m, last_leg=True, told=None, leg=0,
-                  provider_then=False):
-    """The English counterpart of route_line: "" = speak the provider's own announcement (the first
-    line about a maneuver, a CONTINUE line, nothing to place it on); else the brief line. Records what
-    was told — `provider_then` = the provider's own line carries a «Then …» clause."""
+                  provider_then=False, can_say=None):
+    """The English counterpart of route_line, staged the same way: the whole picture the first time a maneuver is
+    named (first_en), the brief line once told (brief_en), a CONTINUE line's banded distance. "" = nothing to place
+    it on (no next maneuver, or no `told`) — the host then keeps the provider's text. Records what was told;
+    `provider_then` is kept for the hosts' signature (every line is composed now, so the composed line decides)."""
     if step_idx + 1 >= len(maneuvers):
         return ""
     man = maneuvers[step_idx + 1][0]
@@ -587,12 +634,16 @@ def route_line_en(maneuvers, step_idx, instr_idx, instr_count, dist_m, last_leg=
     if step_idx + 2 < len(maneuvers):
         then_man, gap = maneuvers[step_idx + 2][0], maneuvers[step_idx + 1][1]
     kind = instruction_kind(instr_idx, instr_count, dist_m)
-    if told is None or kind == CONTINUE:
+    if told is None:
         return ""
-    out = brief_en(kind, man, dist_m, then_man, gap, last_leg) if told.has(leg, step_idx + 1) else ""
-    told.mark(leg, step_idx + 1)
-    if then_included(kind, man, then_man, gap, last_leg) if out else provider_then:
-        told.mark(leg, step_idx + 2)
+    if kind != CONTINUE and told.has(leg, step_idx + 1):
+        out = brief_en(kind, man, dist_m, then_man, gap, last_leg)
+    else:
+        out = first_en(kind, man, dist_m, then_man, gap, last_leg, can_say)
+    if kind != CONTINUE:
+        told.mark(leg, step_idx + 1)
+        if then_included(kind, man, then_man, gap, last_leg) if out else provider_then:
+            told.mark(leg, step_idx + 2)
     return out
 
 

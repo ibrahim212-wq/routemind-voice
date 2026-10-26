@@ -120,7 +120,8 @@ def maneuvers_of(leg):
             if b:
                 deg = (b[0].get("primary") or {}).get("degrees")
         out.append((mv.Maneuver(man.get("type"), man.get("modifier"), man.get("exit"), deg,
-                                st.get("driving_side") or "right"), float(st.get("distance") or 0.0)))
+                                st.get("driving_side") or "right", st.get("name") or None),
+                    float(st.get("distance") or 0.0)))
     return out
 
 

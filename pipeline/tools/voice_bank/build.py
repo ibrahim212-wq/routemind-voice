@@ -258,8 +258,10 @@ class Build:
             if r["lang"] != "en":
                 continue
             oid = ES.override_id(r["seg"])
-            if oid is None or r.get("say_id") == oid or any(t.get("pass") for t in r["takes"]):
+            redo = r["seg"] in ES.REDO
+            if oid is None or r.get("say_id") == oid or (any(t.get("pass") for t in r["takes"]) and not redo):
                 continue
+            keep = self.published_take(r) if redo else None
             for t in r["takes"]:
                 src = os.path.join(self.dir, t["clip"])
                 if os.path.exists(src):
@@ -269,6 +271,8 @@ class Build:
                     os.replace(src, "%s.old%d" % (src, k))
                     t["clip"] = os.path.relpath("%s.old%d" % (src, k), self.dir).replace(os.sep, "/")
             r.setdefault("old_takes", []).extend(r["takes"])
+            if keep is not None:                # REDO: the published take ships until a new take passes
+                r["fallback"] = keep
             r.update(takes=[], status="pending", say_id=oid, errors=0)
             r.pop("last_error", None)
             n += 1
@@ -960,9 +964,10 @@ class Build:
                 "chars": chars, "cut_failures": sum(1 for q in self.s["requests"] if not q["cut_ok"])}
 
     def published_take(self, r):
-        """The take a release ships for a segment: its LATEST passing take (a later retake replaces an earlier one)."""
+        """The take a release ships for a segment: its LATEST passing take (a later retake replaces an earlier one); a
+        REDO segment (en_say.REDO) with no new passing take yet keeps shipping the take it had."""
         ok = [t for t in r["takes"] if t.get("pass")]
-        return ok[-1] if ok else None
+        return ok[-1] if ok else r.get("fallback")
 
     def export(self):
         from tools.voice_bank.publish import bank_frames      # the published form: bare frames, the bank's header
