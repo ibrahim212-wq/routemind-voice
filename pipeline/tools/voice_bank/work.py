@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,10 @@ GH = os.environ.get("GH") or shutil.which("gh") or "gh"
 NOTES = ("Work in progress of the voice bank build (state, verdicts, rendered clips) — NOT for the app: the app reads "
          "the `bank` release only. Written by the voice-bank workflow (pipeline/tools/voice_bank/work.py).")
 CLIP_EXT = (".mp3",)
+# A take moved aside by build.apply_en_say keeps its bytes as <clip>.mp3.old<k>; a REDO segment's `fallback` (the take
+# the release keeps shipping) points at it. Those were never packed (they do not end in .mp3), so every CI run after the
+# 2026-10-25 REDO crashed at publish on '...8a557dfe8a243bed.mp3.old0' (release hardening 2026-11-08).
+OLD_TAKE_RX = re.compile(r"\.mp3\.old\d+$")
 
 
 def log(*a):
@@ -93,7 +98,7 @@ def clip_members(out, build):
     for dp, ds, fs in os.walk(base):
         ds.sort()
         for f in sorted(fs):
-            if f.endswith(CLIP_EXT) and not f.endswith(".heard.mp3"):
+            if (f.endswith(CLIP_EXT) or OLD_TAKE_RX.search(f)) and not f.endswith(".heard.mp3"):
                 p = os.path.join(dp, f)
                 m.append((os.path.relpath(p, out).replace(os.sep, "/"), p))
     return m
@@ -168,8 +173,40 @@ def _stage_asset(stage, name, data):
     return {"sha256": sha, "bytes": len(data), "parts": parts}, paths
 
 
+def referenced_clips(out):
+    """Every clip file the pipeline READS from a build's state — its takes and its REDO fallback (publish ships the
+    fallback until a new take passes) — relative to OUT. `old_takes` is a record only: nothing reads its audio (39 of
+    those files were already lost with the unpacked .oldN files when this was written, 2026-11-08)."""
+    refs = set()
+    for build in sorted(m["build"] for m in BK.BANKS.values()):
+        p = os.path.join(out, build, "state.json")
+        if not os.path.exists(p):
+            continue
+        st = json.load(io.open(p, encoding="utf-8"))
+        for r in st.get("segs", {}).values():
+            takes = list(r.get("takes", [])) + ([r["fallback"]] if r.get("fallback") else [])
+            for t in takes:
+                if t.get("clip"):
+                    refs.add((build + "/" + t["clip"]).replace("\\", "/"))
+    return refs
+
+
+def missing_clips(out):
+    """The clips a state names that the archive would not carry (the file is gone, or the packer leaves it out)."""
+    packed = set()
+    for build in sorted(m["build"] for m in BK.BANKS.values()):
+        packed |= {n for n, _ in clip_members(out, build)}
+    return sorted(c for c in referenced_clips(out) if c not in packed)
+
+
 def push(out, lead=None):
     import datetime
+    # a state that names a clip the archive does not carry is refused BEFORE anything is uploaded: the next run would
+    # read the state and crash on the missing file (the 2026-10-26 … 11-08 publish failures)
+    gone = missing_clips(out)
+    if gone:
+        raise SystemExit("[work] the state names %d clip(s) the archive would not carry, e.g. %s — not pushed"
+                         % (len(gone), gone[:3]))
     ensure_release()
     have = remote_work_json().get("assets", {})
     stage = tempfile.mkdtemp(prefix="vb-work-")
@@ -261,10 +298,40 @@ def lead_path():
     return os.path.join(mv.ROOT, "assets", "voice", "ar", mv.fnv64(build_bank.CONTEXT_LEAD) + ".mp3")
 
 
+def selftest():
+    """The 2026-10-26 … 11-08 outage as a case: a REDO segment whose fallback (the take the release keeps shipping) is
+    a moved-aside <clip>.mp3.old0 must be PACKED, and a state naming a clip that is gone must be refused before any
+    upload. Offline; a temp OUT. (Before the fix the .old0 was left out and nothing noticed.)"""
+    build = sorted(m["build"] for m in BK.BANKS.values())[0]
+    ok = True
+    with tempfile.TemporaryDirectory() as out:
+        d = os.path.join(out, build, "clips", "en", "t1")
+        os.makedirs(d)
+        open(os.path.join(d, "aaaa.mp3"), "wb").write(b"x")
+        open(os.path.join(d, "bbbb.mp3.old0"), "wb").write(b"y")
+        open(os.path.join(d, "bbbb.mp3.heard.mp3"), "wb").write(b"z")
+        st = {"segs": {"en|a": {"takes": [{"clip": "clips/en/t1/aaaa.mp3", "pass": True}]},
+                       "en|b": {"takes": [], "fallback": {"clip": "clips/en/t1/bbbb.mp3.old0", "pass": True}}}}
+        io.open(os.path.join(out, build, "state.json"), "w", encoding="utf-8").write(json.dumps(st))
+        packed = {n for n, _ in clip_members(out, build)}
+        for name, want, got in (("the REDO fallback .mp3.old0 is packed", True, build + "/clips/en/t1/bbbb.mp3.old0" in packed),
+                                ("the judge's .heard.mp3 copy is not", False, build + "/clips/en/t1/bbbb.mp3.heard.mp3" in packed),
+                                ("nothing the state reads is missing", True, missing_clips(out) == [])):
+            print("  %s  %s" % ("PASS" if want == got else "FAIL", name))
+            ok &= want == got
+        os.remove(os.path.join(d, "bbbb.mp3.old0"))
+        gone = missing_clips(out)
+        good = gone == [build + "/clips/en/t1/bbbb.mp3.old0"]
+        print("  %s  a fallback whose file is gone is reported (push refuses it): %s" % ("PASS" if good else "FAIL", gone))
+        ok &= good
+    print("work selftest: %s" % ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["pull", "push", "seed", "status"])
+    ap.add_argument("cmd", choices=["pull", "push", "seed", "status", "selftest"])
     ap.add_argument("--dir", default=OUT)
     a = ap.parse_args()
     if a.cmd == "pull":
@@ -273,6 +340,8 @@ def main():
         push(a.dir)
     elif a.cmd == "seed":
         push(a.dir, lead=lead_path())
+    elif a.cmd == "selftest":
+        sys.exit(selftest())
     else:
         print(json.dumps(remote_work_json(), indent=1))
 

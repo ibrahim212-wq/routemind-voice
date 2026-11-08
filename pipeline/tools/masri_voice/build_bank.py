@@ -601,6 +601,17 @@ def report():
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     a = sys.argv[1:]
+    # Since 2026-11-08 the bundled bank is the PUBLISHED Despina bank (tools/masri_voice/bundle_published.py). This
+    # builder knows only its own Zephyr voice: run over that bank it would judge every clip stale, delete the clips its
+    # phrasebook does not reach, and rewrite the manifest's voice — so it refuses (release hardening §5).
+    _mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_manifest.json")
+    if os.path.exists(_mp):
+        _vid = (json.load(io.open(_mp, encoding="utf-8")).get("voice") or {}).get("id", "")
+        if _vid and _vid != voice_id():
+            print("build_bank: the bundled bank is %s (written by tools/masri_voice/bundle_published.py), not this "
+                  "builder's %s — refused. Use `python -m tools.masri_voice.bundle_published --check` (or --fetch)."
+                  % (_vid, voice_id()))
+            sys.exit(2)
     if "--check" in a:
         sys.exit(0 if check() else 1)
     if "--report" in a:
