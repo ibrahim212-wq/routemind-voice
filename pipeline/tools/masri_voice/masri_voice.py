@@ -715,9 +715,26 @@ def ev_report(kind, dist_m, limit_kmh=None, variant=0, fem=False):
 
 
 def ev_simple(key, variant=0, fem=False):
-    """wrongway · offroute · offroute.missed · offline.coverage_exit · gps.lost · traffic.switched ·
+    """wrongway · offroute · offroute.missed · reroute · offline.coverage_exit · gps.lost · traffic.switched ·
     alt.switched · stop.reached · mark."""
     return line([pick("ev." + key, variant, fem)])
+
+
+def ev_reroute(missed, variant=0, fem=False, can_say=None):
+    """The reroute line (the owner's decision, 2026-11-09): the short «هغيّرلك الطريق.» whenever a bank can play it
+    (`can_say` = VoiceBank.covers), else the line it replaces — offroute.missed / offroute — so a phone without the new
+    clip (the voice-bank CI publishes it) says exactly what it said before, from the bank, never silence and never
+    another voice. The new route's first instruction waits behind this line: its length IS the announce part of the
+    reroute time (docs/positioning-2026-11.md §7.4)."""
+    short = ev_simple("reroute", variant, fem)
+    if can_say is None or can_say(short):
+        return short
+    return ev_simple("offroute.missed" if missed else "offroute", variant, fem)
+
+
+# The English reroute line on every surface (was "You missed the turn. Finding a new route." after a missed turn):
+# already a segment of the English bank (tools/voice_audition/bank_plan.py events).
+REROUTE_EN = "Finding a new route."
 
 
 def ev_faster_route(save_min, variant=0, fem=False):

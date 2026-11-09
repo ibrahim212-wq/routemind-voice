@@ -102,7 +102,7 @@ def all_segments():
             for k in mv.REPORT_KINDS:
                 add_line(mv.ev_report(k, 500.0, None, v, fem))
                 add_line(mv.ev_report(k, 500.0, 60, v, fem))
-            for k in ("wrongway", "offroute", "offroute.missed", "offline.coverage_exit", "gps.lost",
+            for k in ("wrongway", "offroute", "offroute.missed", "reroute", "offline.coverage_exit", "gps.lost",
                       "traffic.switched", "alt.switched", "stop.reached", "mark"):
                 add_line(mv.ev_simple(k, v, fem))
             for mn in all_minutes():
@@ -201,7 +201,7 @@ def categorized():
             for k in mv.REPORT_KINDS:
                 put("report", line(mv.ev_report(k, 500.0, None, v, fem)))
                 put("report", line(mv.ev_report(k, 500.0, 60, v, fem)))
-            for k in ("wrongway", "offroute", "offroute.missed", "offline.coverage_exit", "gps.lost",
+            for k in ("wrongway", "offroute", "offroute.missed", "reroute", "offline.coverage_exit", "gps.lost",
                       "traffic.switched", "alt.switched", "stop.reached", "mark"):
                 put("event", line(mv.ev_simple(k, v, fem)))
             for mn in all_minutes():
